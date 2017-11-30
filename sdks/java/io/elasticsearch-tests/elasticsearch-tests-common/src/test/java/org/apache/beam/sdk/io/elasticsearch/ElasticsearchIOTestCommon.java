@@ -28,10 +28,12 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.google.common.base.Function;
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.Collections;
 import java.util.List;
+import javax.annotation.Nullable;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.testing.PAssert;
@@ -303,6 +305,55 @@ class ElasticsearchIOTestCommon implements Serializable {
           }
         }
       }
+    }
+  }
+
+  void testWriteWithIdFn() throws Exception {
+    Function idFn = new Function<JsonNode, String>() {
+      @Nullable
+      @Override
+      public String apply(@Nullable JsonNode json) {
+        if (json.path("scientist").asText().equals("Einstein")) {
+          return "EinsteinSpecialID#";
+        }
+        return json.path("id").asText();
+      }
+    };
+
+    Write write =
+        ElasticsearchIO.write()
+            .withConnectionConfiguration(connectionConfiguration)
+            .withIdFn(idFn);
+
+    try (DoFnTester<String, Void> fnTester = DoFnTester.of(new Write.WriteFn(write))) {
+      List<String> input =
+          ElasticSearchIOTestUtils.createDocuments(
+              numDocs, ElasticSearchIOTestUtils.InjectionMode.DO_NOT_INJECT_INVALID_DOCS);
+      pipeline
+          .apply(Create.of(input))
+          .apply(write);
+
+      pipeline.run();
+      String requestBody =
+          "{\n"
+          + "  \"query\" : {\"match\": {\n"
+          + "    \"scientist\": \"Einstein\"\n"
+          + "  }}\n"
+          + "}\n";
+      String endPoint = String.format("/%s/%s/_search", connectionConfiguration.getIndex(),
+          connectionConfiguration.getType());
+      HttpEntity httpEntity = new NStringEntity(requestBody, ContentType.APPLICATION_JSON);
+      Response response =
+          restClient.performRequest(
+              "GET",
+              endPoint,
+              Collections.<String, String>emptyMap(),
+              httpEntity);
+      JsonNode searchResult = parseResponse(response);
+      int count = searchResult.path("hits").path("total").asInt();
+      // All documents with the value Einstein in them should have the same document id,
+      // and therefore will have overwritten for each time it occurred.
+      assertEquals(1, count);
     }
   }
 }
