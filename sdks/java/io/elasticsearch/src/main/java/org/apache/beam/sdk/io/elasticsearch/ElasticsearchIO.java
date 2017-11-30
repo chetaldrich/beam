@@ -743,6 +743,8 @@ public class ElasticsearchIO {
 
     abstract Function<JsonNode, String> getIdFn();
 
+    abstract Function<JsonNode, String> getIndexFn();
+
     abstract Builder builder();
 
     @AutoValue.Builder
@@ -754,6 +756,8 @@ public class ElasticsearchIO {
       abstract Builder setMaxBatchSizeBytes(long maxBatchSizeBytes);
 
       abstract Builder setIdFn(Function<JsonNode, String> idFn);
+
+      abstract Builder setIndexFn(Function<JsonNode, String> idFn);
 
       abstract Write build();
     }
@@ -804,6 +808,11 @@ public class ElasticsearchIO {
     public Write withIdFn(Function<JsonNode, String> idFn) {
       checkArgument(idFn != null, "idFn must not be null");
       return builder().setIdFn(idFn).build();
+    }
+
+    public Write withIndexFn(Function<JsonNode, String> indexFn) {
+      checkArgument(indexFn != null, "indexFn must not be null");
+      return builder().setIndexFn(indexFn).build();
     }
 
     @Override
@@ -863,10 +872,15 @@ public class ElasticsearchIO {
         String document = context.element();
         IndexActionFields fields = null;
 
-        if (spec.getIdFn() != null) {
+        if (spec.getIdFn() != null || spec.getIndexFn() != null) {
           fields = new IndexActionFields();
           JsonNode json = mapper.readTree(document);
-          fields.id = spec.getIdFn().apply(json);
+          if (spec.getIdFn() != null) {
+            fields.id = spec.getIdFn().apply(json);
+          }
+          if (spec.getIndexFn() != null) {
+            fields.index = spec.getIndexFn().apply(json);
+          }
         }
 
         if (fields != null) {
