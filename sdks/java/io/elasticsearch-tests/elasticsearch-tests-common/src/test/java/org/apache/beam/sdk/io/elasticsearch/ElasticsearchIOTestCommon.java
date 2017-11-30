@@ -22,6 +22,7 @@ import static org.apache.beam.sdk.io.elasticsearch.ElasticsearchIO.ConnectionCon
 import static org.apache.beam.sdk.io.elasticsearch.ElasticsearchIO.Read;
 import static org.apache.beam.sdk.io.elasticsearch.ElasticsearchIO.Write;
 import static org.apache.beam.sdk.io.elasticsearch.ElasticsearchIO.parseResponse;
+import static org.hamcrest.Matchers.any;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.core.Is.isA;
 import static org.junit.Assert.assertEquals;
@@ -355,6 +356,61 @@ class ElasticsearchIOTestCommon implements Serializable {
       // All documents with the value Einstein in them should have the same document id,
       // and therefore will have overwritten for each time it occurred.
       assertEquals(1, count);
+    }
+  }
+
+  void testWriteWithIndexFn() throws Exception {
+    Function indexFn = new Function<JsonNode, String>() {
+      @Nullable
+      @Override
+      public String apply(@Nullable JsonNode json) {
+        if (json.path("id").asInt() % 2 == 0) {
+          return "evenIndex";
+        }
+        return "oddIndex";
+      }
+    };
+
+    Write write =
+        ElasticsearchIO.write()
+            .withConnectionConfiguration(connectionConfiguration)
+            .withIndexFn(indexFn);
+
+    try (DoFnTester<String, Void> fnTester = DoFnTester.of(new Write.WriteFn(write))) {
+      List<String> input =
+          ElasticSearchIOTestUtils.createDocuments(
+              numDocs, ElasticSearchIOTestUtils.InjectionMode.DO_NOT_INJECT_INVALID_DOCS);
+      pipeline
+          .apply(Create.of(input))
+          .apply(write);
+
+      pipeline.run();
+      String requestBody = "{\n" + "  \"query\" : {\"match_all\": {}\n";
+      String evenEndPoint = String.format("/%s/%s/_search", "evenIndex",
+          connectionConfiguration.getType());
+      String oddEndPoint = String.format("/%s/%s/_search", "oddIndex",
+          connectionConfiguration.getType());
+      HttpEntity httpEntity = new NStringEntity(requestBody, ContentType.APPLICATION_JSON);
+      Response evenResponse =
+          restClient.performRequest(
+              "GET",
+              evenEndPoint,
+              Collections.<String, String>emptyMap(),
+              httpEntity);
+      Response oddResponse =
+          restClient.performRequest(
+              "GET",
+              evenEndPoint,
+              Collections.<String, String>emptyMap(),
+              httpEntity);
+      JsonNode evenDocuments = parseResponse(evenResponse);
+      JsonNode oddDocuments = parseResponse(oddResponse);
+      int evenCount = evenDocuments.path("hits").path("total").asInt();
+      int oddCount = oddDocuments.path("hits").path("total").asInt();
+      // each index should have half of the entries, since we're using the increasing ids,
+      // no duplicates, and half will be even, half will be odd.
+      assertEquals(numDocs / 2, evenCount);
+      assertEquals(numDocs / 2, oddCount);
     }
   }
 }
