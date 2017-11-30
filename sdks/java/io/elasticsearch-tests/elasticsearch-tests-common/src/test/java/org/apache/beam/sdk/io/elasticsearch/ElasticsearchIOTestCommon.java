@@ -22,7 +22,6 @@ import static org.apache.beam.sdk.io.elasticsearch.ElasticsearchIO.ConnectionCon
 import static org.apache.beam.sdk.io.elasticsearch.ElasticsearchIO.Read;
 import static org.apache.beam.sdk.io.elasticsearch.ElasticsearchIO.Write;
 import static org.apache.beam.sdk.io.elasticsearch.ElasticsearchIO.parseResponse;
-import static org.hamcrest.Matchers.any;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.core.Is.isA;
 import static org.junit.Assert.assertEquals;
