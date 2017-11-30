@@ -23,8 +23,6 @@ import static com.google.common.base.Preconditions.checkState;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonInclude.Include;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.fasterxml.jackson.annotation.JsonSubTypes;
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.auto.value.AutoValue;
@@ -743,7 +741,7 @@ public class ElasticsearchIO {
 
     abstract long getMaxBatchSizeBytes();
 
-    abstract Function<Map<String, Object>, String> getIdFn();
+    abstract Function<JsonNode, String> getIdFn();
 
     abstract Builder builder();
 
@@ -755,7 +753,7 @@ public class ElasticsearchIO {
 
       abstract Builder setMaxBatchSizeBytes(long maxBatchSizeBytes);
 
-      abstract Builder setIdFn(Function<Map<String, Object>, String> idFn);
+      abstract Builder setIdFn(Function<JsonNode, String> idFn);
 
       abstract Write build();
     }
@@ -803,7 +801,7 @@ public class ElasticsearchIO {
       return builder().setMaxBatchSizeBytes(batchSizeBytes).build();
     }
 
-    public Write withIdFn(Function<Map<String, Object>, String> idFn) {
+    public Write withIdFn(Function<JsonNode, String> idFn) {
       checkArgument(idFn != null, "idFn must not be null");
       return builder().setIdFn(idFn).build();
     }
@@ -867,12 +865,13 @@ public class ElasticsearchIO {
 
         if (spec.getIdFn() != null) {
           fields = new IndexActionFields();
-          Map<String, Object> json = mapper.readValue(document, new TypeReference<Map<String,Object>>(){});
+          JsonNode json = mapper.readTree(document);
           fields.id = spec.getIdFn().apply(json);
         }
 
         if (fields != null) {
-          batch.add(String.format("{ \"index\" : %s }%n%s%n", mapper.writeValueAsString(fields), document));
+          batch.add(String.format("{ \"index\" : %s }%n%s%n",
+              mapper.writeValueAsString(fields), document));
         } else {
           batch.add(String.format("{ \"index\" : {} }%n%s%n", document));
         }
