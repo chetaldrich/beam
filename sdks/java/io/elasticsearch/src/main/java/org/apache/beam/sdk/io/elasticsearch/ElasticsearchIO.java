@@ -20,10 +20,16 @@ package org.apache.beam.sdk.io.elasticsearch;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonInclude.Include;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonSubTypes;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.auto.value.AutoValue;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Function;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -737,6 +743,8 @@ public class ElasticsearchIO {
 
     abstract long getMaxBatchSizeBytes();
 
+    abstract Function<Map<String, Object>, String> getIdFn();
+
     abstract Builder builder();
 
     @AutoValue.Builder
@@ -746,6 +754,8 @@ public class ElasticsearchIO {
       abstract Builder setMaxBatchSize(long maxBatchSize);
 
       abstract Builder setMaxBatchSizeBytes(long maxBatchSizeBytes);
+
+      abstract Builder setIdFn(Function<Map<String, Object>, String> idFn);
 
       abstract Write build();
     }
@@ -793,6 +803,11 @@ public class ElasticsearchIO {
       return builder().setMaxBatchSizeBytes(batchSizeBytes).build();
     }
 
+    public Write withIdFn(Function<Map<String, Object>, String> idFn) {
+      checkArgument(idFn != null, "idFn must not be null");
+      return builder().setIdFn(idFn).build();
+    }
+
     @Override
     public PDone expand(PCollection<String> input) {
       ConnectionConfiguration connectionConfiguration = getConnectionConfiguration();
@@ -807,12 +822,25 @@ public class ElasticsearchIO {
     @VisibleForTesting
     static class WriteFn extends DoFn<String, Void> {
 
+      @JsonInclude(Include.NON_NULL)
+      private class IndexActionFields implements Serializable {
+        @JsonProperty("_index")
+        String index;
+
+        @JsonProperty("_type")
+        String type;
+
+        @JsonProperty("_id")
+        String id;
+
+      }
 
       private int backendVersion;
       private final Write spec;
       private transient RestClient restClient;
       private ArrayList<String> batch;
       private long currentBatchSizeBytes;
+      private ObjectMapper mapper = new ObjectMapper();
 
       @VisibleForTesting
       WriteFn(Write spec) {
@@ -835,7 +863,20 @@ public class ElasticsearchIO {
       @ProcessElement
       public void processElement(ProcessContext context) throws Exception {
         String document = context.element();
-        batch.add(String.format("{ \"index\" : {} }%n%s%n", document));
+        IndexActionFields fields = null;
+
+        if (spec.getIdFn() != null) {
+          fields = new IndexActionFields();
+          Map<String, Object> json = mapper.readValue(document, new TypeReference<Map<String,Object>>(){});
+          fields.id = spec.getIdFn().apply(json);
+        }
+
+        if (fields != null) {
+          batch.add(String.format("{ \"index\" : %s }%n%s%n", mapper.writeValueAsString(fields), document));
+        } else {
+          batch.add(String.format("{ \"index\" : {} }%n%s%n", document));
+        }
+
         currentBatchSizeBytes += document.getBytes(StandardCharsets.UTF_8).length;
         if (batch.size() >= spec.getMaxBatchSize()
             || currentBatchSizeBytes >= spec.getMaxBatchSizeBytes()) {
