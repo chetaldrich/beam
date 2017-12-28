@@ -28,7 +28,6 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.google.common.base.Function;
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.Collections;
@@ -314,7 +313,6 @@ class ElasticsearchIOTestCommon implements Serializable {
 
   void testWriteWithIdFn() throws Exception {
     IdFn idFn = new IdFn() {
-
       @Override public String apply(@Nullable JSONObject json) {
         if (json.get("scientist").equals("Einstein")) {
           return "EinsteinSpecialID#";

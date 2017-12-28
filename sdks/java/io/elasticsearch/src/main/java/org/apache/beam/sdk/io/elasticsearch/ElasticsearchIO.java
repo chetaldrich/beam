@@ -27,6 +27,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.auto.value.AutoValue;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Function;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -858,6 +859,7 @@ public class ElasticsearchIO {
       private transient RestClient restClient;
       private ArrayList<String> batch;
       private long currentBatchSizeBytes;
+      private ObjectMapper mapper = new ObjectMapper();
 
       @VisibleForTesting
       WriteFn(Write spec) {
