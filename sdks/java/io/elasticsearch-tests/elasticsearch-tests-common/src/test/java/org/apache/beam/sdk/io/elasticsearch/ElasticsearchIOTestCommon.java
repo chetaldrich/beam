@@ -34,6 +34,8 @@ import java.io.Serializable;
 import java.util.Collections;
 import java.util.List;
 import javax.annotation.Nullable;
+import org.apache.beam.sdk.io.elasticsearch.ElasticsearchIO.Write.IdFn;
+import org.apache.beam.sdk.io.elasticsearch.ElasticsearchIO.Write.IndexFn;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.testing.PAssert;
@@ -48,6 +50,7 @@ import org.apache.http.nio.entity.NStringEntity;
 import org.elasticsearch.client.Response;
 import org.elasticsearch.client.RestClient;
 import org.hamcrest.CustomMatcher;
+import org.json.simple.JSONObject;
 import org.junit.rules.ExpectedException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -310,14 +313,13 @@ class ElasticsearchIOTestCommon implements Serializable {
   }
 
   void testWriteWithIdFn() throws Exception {
-    Function idFn = new Function<JsonNode, String>() {
-      @Nullable
-      @Override
-      public String apply(@Nullable JsonNode json) {
-        if (json.path("scientist").asText().equals("Einstein")) {
+    IdFn idFn = new IdFn() {
+
+      @Override public String apply(@Nullable JSONObject json) {
+        if (json.get("scientist").equals("Einstein")) {
           return "EinsteinSpecialID#";
         }
-        return json.path("id").asText();
+        return (String) json.get("id");
       }
     };
 
@@ -330,11 +332,11 @@ class ElasticsearchIOTestCommon implements Serializable {
       List<String> input =
           ElasticSearchIOTestUtils.createDocuments(
               numDocs, ElasticSearchIOTestUtils.InjectionMode.DO_NOT_INJECT_INVALID_DOCS);
-      pipeline
-          .apply(Create.of(input))
-          .apply(write);
 
-      pipeline.run();
+      for (String document : input) {
+        fnTester.processElement(document);
+      }
+
       String requestBody =
           "{\n"
           + "  \"query\" : {\"match\": {\n"
@@ -359,11 +361,10 @@ class ElasticsearchIOTestCommon implements Serializable {
   }
 
   void testWriteWithIndexFn() throws Exception {
-    Function indexFn = new Function<JsonNode, String>() {
-      @Nullable
-      @Override
-      public String apply(@Nullable JsonNode json) {
-        if (json.path("id").asInt() % 2 == 0) {
+    IndexFn indexFn = new IndexFn() {
+
+      @Override public String apply(@Nullable JSONObject json) {
+        if ((int) json.get("id") % 2 == 0) {
           return "evenIndex";
         }
         return "oddIndex";

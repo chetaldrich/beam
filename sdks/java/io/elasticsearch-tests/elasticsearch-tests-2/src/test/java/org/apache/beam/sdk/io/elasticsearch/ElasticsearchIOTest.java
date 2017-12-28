@@ -159,6 +159,17 @@ public class ElasticsearchIOTest implements Serializable {
   }
 
   @Test
+  public void testWriteWithIdFn() throws Exception {
+    elasticsearchIOTestCommon.setPipeline(pipeline);
+    elasticsearchIOTestCommon.testWriteWithIdFn();
+  }
+
+  @Test
+  public void testWriteWithIndexFn() throws Exception {
+    elasticsearchIOTestCommon.testWriteWithIndexFn();
+  }
+
+  @Test
   public void testSplit() throws Exception {
     ElasticSearchIOTestUtils
         .insertTestDocuments(connectionConfiguration, NUM_DOCS_UTESTS, restClient);

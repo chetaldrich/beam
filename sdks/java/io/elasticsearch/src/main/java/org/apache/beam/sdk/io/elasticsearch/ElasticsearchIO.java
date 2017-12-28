@@ -27,7 +27,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.auto.value.AutoValue;
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Function;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -74,6 +73,8 @@ import org.apache.http.ssl.SSLContexts;
 import org.elasticsearch.client.Response;
 import org.elasticsearch.client.RestClient;
 import org.elasticsearch.client.RestClientBuilder;
+import org.json.simple.JSONObject;
+import org.json.simple.parser.JSONParser;
 
 /**
  * Transforms for reading and writing data from/to Elasticsearch.
@@ -741,9 +742,11 @@ public class ElasticsearchIO {
 
     abstract long getMaxBatchSizeBytes();
 
-    abstract Function<JsonNode, String> getIdFn();
+    @Nullable
+    abstract IdFn getIdFn();
 
-    abstract Function<JsonNode, String> getIndexFn();
+    @Nullable
+    abstract IndexFn getIndexFn();
 
     abstract Builder builder();
 
@@ -755,9 +758,9 @@ public class ElasticsearchIO {
 
       abstract Builder setMaxBatchSizeBytes(long maxBatchSizeBytes);
 
-      abstract Builder setIdFn(Function<JsonNode, String> idFn);
+      abstract Builder setIdFn(IdFn idFn);
 
-      abstract Builder setIndexFn(Function<JsonNode, String> idFn);
+      abstract Builder setIndexFn(IndexFn indexFn);
 
       abstract Write build();
     }
@@ -805,12 +808,20 @@ public class ElasticsearchIO {
       return builder().setMaxBatchSizeBytes(batchSizeBytes).build();
     }
 
-    public Write withIdFn(Function<JsonNode, String> idFn) {
+    public abstract static class IdFn implements Serializable {
+      public abstract String apply(@Nullable JSONObject json);
+    }
+
+    public Write withIdFn(IdFn idFn) {
       checkArgument(idFn != null, "idFn must not be null");
       return builder().setIdFn(idFn).build();
     }
 
-    public Write withIndexFn(Function<JsonNode, String> indexFn) {
+    public abstract static class IndexFn implements Serializable {
+      public abstract String apply(@Nullable JSONObject json);
+    }
+
+    public Write withIndexFn(IndexFn indexFn) {
       checkArgument(indexFn != null, "indexFn must not be null");
       return builder().setIndexFn(indexFn).build();
     }
@@ -847,7 +858,6 @@ public class ElasticsearchIO {
       private transient RestClient restClient;
       private ArrayList<String> batch;
       private long currentBatchSizeBytes;
-      private ObjectMapper mapper = new ObjectMapper();
 
       @VisibleForTesting
       WriteFn(Write spec) {
@@ -874,7 +884,7 @@ public class ElasticsearchIO {
 
         if (spec.getIdFn() != null || spec.getIndexFn() != null) {
           fields = new IndexActionFields();
-          JsonNode json = mapper.readTree(document);
+          JSONObject json = (JSONObject) new JSONParser().parse(document);
           if (spec.getIdFn() != null) {
             fields.id = spec.getIdFn().apply(json);
           }
