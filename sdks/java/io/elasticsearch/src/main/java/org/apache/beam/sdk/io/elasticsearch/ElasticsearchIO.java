@@ -809,18 +809,14 @@ public class ElasticsearchIO {
       return builder().setMaxBatchSizeBytes(batchSizeBytes).build();
     }
 
-    public abstract static class IdFn implements Serializable {
-      public abstract String apply(@Nullable JSONObject json);
-    }
+    public interface IdFn extends Serializable, Function<JSONObject, String> {}
 
     public Write withIdFn(IdFn idFn) {
       checkArgument(idFn != null, "idFn must not be null");
       return builder().setIdFn(idFn).build();
     }
 
-    public abstract static class IndexFn implements Serializable {
-      public abstract String apply(@Nullable JSONObject json);
-    }
+    public interface IndexFn extends Serializable, Function<JSONObject, String> {}
 
     public Write withIndexFn(IndexFn indexFn) {
       checkArgument(indexFn != null, "indexFn must not be null");

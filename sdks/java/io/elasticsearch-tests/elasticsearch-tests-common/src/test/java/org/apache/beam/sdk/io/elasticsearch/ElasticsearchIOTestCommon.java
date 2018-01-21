@@ -311,20 +311,21 @@ class ElasticsearchIOTestCommon implements Serializable {
     }
   }
 
-  void testWriteWithIdFn() throws Exception {
-    IdFn idFn = new IdFn() {
-      @Override public String apply(@Nullable JSONObject json) {
-        if (json.get("scientist").equals("Einstein")) {
-          return "EinsteinSpecialID#";
-        }
-        return (String) json.get("id");
+  public static class TestIdFn implements IdFn, Serializable {
+    @Nullable @Override public String apply(@Nullable JSONObject json) {
+      if (json.get("scientist").equals("Einstein")) {
+        return "EinsteinSpecialID#";
       }
-    };
+      return String.valueOf(json.get("id"));
+    }
+  }
+
+  void testWriteWithIdFn() throws Exception {
 
     Write write =
         ElasticsearchIO.write()
             .withConnectionConfiguration(connectionConfiguration)
-            .withIdFn(idFn);
+            .withIdFn(new TestIdFn());
 
     try (DoFnTester<String, Void> fnTester = DoFnTester.of(new Write.WriteFn(write))) {
       List<String> input =
@@ -358,21 +359,24 @@ class ElasticsearchIOTestCommon implements Serializable {
     }
   }
 
-  void testWriteWithIndexFn() throws Exception {
-    IndexFn indexFn = new IndexFn() {
+  public static class TestIndexFn implements IndexFn {
+    private static final long serialVersionUID = 1196122924407642856L;
 
-      @Override public String apply(@Nullable JSONObject json) {
-        if ((int) json.get("id") % 2 == 0) {
-          return "evenIndex";
-        }
-        return "oddIndex";
+    @Override
+    public String apply(@Nullable JSONObject json) {
+      if ((int) json.get("id") % 2 == 0) {
+        return "evenIndex";
       }
-    };
+      return "oddIndex";
+    }
+  }
+
+  void testWriteWithIndexFn() throws Exception {
 
     Write write =
         ElasticsearchIO.write()
             .withConnectionConfiguration(connectionConfiguration)
-            .withIndexFn(indexFn);
+            .withIndexFn(new TestIndexFn());
 
     try (DoFnTester<String, Void> fnTester = DoFnTester.of(new Write.WriteFn(write))) {
       List<String> input =
