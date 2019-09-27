@@ -62,14 +62,16 @@ class ElasticsearchIOTestUtils {
   }
 
   private static void closeIndex(RestClient restClient, String index) throws IOException {
-    restClient.performRequest("POST", String.format("/%s/_close", index));
+    Request request = new Request("POST", String.format("/%s/_close", index));
+    restClient.performRequest(request);
   }
 
   private static void deleteIndex(RestClient restClient, String index) throws IOException {
     try {
       closeIndex(restClient, index);
-      restClient.performRequest(
-          "DELETE", String.format("/%s", index), Collections.singletonMap("refresh", "wait_for"));
+      Request request = new Request("DELETE", String.format("/%s", index));
+      request.addParameters(Collections.singletonMap("refresh", "wait_for"));
+      restClient.performRequest(request);
     } catch (IOException e) {
       // it is fine to ignore this expression as deleteIndex occurs in @before,
       // so when the first tests is run, the index does not exist yet
@@ -91,8 +93,10 @@ class ElasticsearchIOTestUtils {
                 "{\"source\" : { \"index\" : \"%s\" }, \"dest\" : { \"index\" : \"%s\" } }",
                 source, target),
             ContentType.APPLICATION_JSON);
-    restClient.performRequest(
-        "POST", "/_reindex", Collections.singletonMap("refresh", "wait_for"), entity);
+    Request request = new Request("POST", "/_reindex");
+    request.addParameters(Collections.singletonMap("refresh", "wait_for"));
+    request.setEntity(entity);
+    restClient.performRequest(request);
   }
 
   /** Inserts the given number of test documents into Elasticsearch. */
@@ -113,14 +117,15 @@ class ElasticsearchIOTestUtils {
               i++,
               document));
     }
-    String endPoint =
+    String endpoint =
         String.format(
             "/%s/%s/_bulk", connectionConfiguration.getIndex(), connectionConfiguration.getType());
     HttpEntity requestBody =
         new NStringEntity(bulkRequest.toString(), ContentType.APPLICATION_JSON);
-    Response response =
-        restClient.performRequest(
-            "POST", endPoint, Collections.singletonMap("refresh", "wait_for"), requestBody);
+    Request request = new Request("POST", endpoint);
+    request.addParameters(Collections.singletonMap("refresh", "wait_for"));
+    request.setEntity(requestBody);
+    Response response = restClient.performRequest(request);
     ElasticsearchIO.checkForErrors(
         response.getEntity(), ElasticsearchIO.getBackendVersion(connectionConfiguration), false);
   }
@@ -152,11 +157,13 @@ class ElasticsearchIOTestUtils {
       throws IOException {
     long result = 0;
     try {
-      String endPoint = String.format("/%s/_refresh", index);
-      restClient.performRequest("POST", endPoint);
+      String endpoint = String.format("/%s/_refresh", index);
+      Request refreshRequest = new Request("POST", endpoint);
+      restClient.performRequest(refreshRequest);
 
-      endPoint = String.format("/%s/%s/_search", index, type);
-      Response response = restClient.performRequest("GET", endPoint);
+      endpoint = String.format("/%s/%s/_search", index, type);
+      Request searchRequest = new Request("GET", endpoint);
+      Response response = restClient.performRequest(searchRequest);
       JsonNode searchResult = ElasticsearchIO.parseResponse(response.getEntity());
       result = searchResult.path("hits").path("total").asLong();
     } catch (IOException e) {
@@ -234,13 +241,14 @@ class ElasticsearchIOTestUtils {
             + "\"\n"
             + "  }}\n"
             + "}\n";
-    String endPoint =
+    String endpoint =
         String.format(
             "/%s/%s/_search",
             connectionConfiguration.getIndex(), connectionConfiguration.getType());
     HttpEntity httpEntity = new NStringEntity(requestBody, ContentType.APPLICATION_JSON);
-    Response response =
-        restClient.performRequest("GET", endPoint, Collections.emptyMap(), httpEntity);
+    Request request = new Request("GET", endpoint);
+    request.setEntity(httpEntity);
+    Response response = restClient.performRequest(request);
     JsonNode searchResult = parseResponse(response.getEntity());
     return searchResult.path("hits").path("total").asInt();
   }
