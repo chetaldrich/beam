@@ -27,6 +27,7 @@ import java.io.IOException;
 import java.io.Serializable;
 import org.apache.beam.sdk.io.common.NetworkTestHelper;
 import org.apache.beam.sdk.testing.TestPipeline;
+import org.elasticsearch.client.Request;
 import org.elasticsearch.client.RestClient;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.node.Node;
@@ -93,8 +94,9 @@ public class ElasticsearchIOTest implements Serializable {
         new ElasticsearchIOTestCommon(connectionConfiguration, restClient, false);
     int waitingTime = 0;
     int healthCheckFrequency = 500;
+    Request request = new Request("HEAD", "/");
     while ((waitingTime < MAX_STARTUP_WAITING_TIME_MSEC)
-        && restClient.performRequest("HEAD", "/").getStatusLine().getStatusCode() != 200) {
+        && restClient.performRequest(request).getStatusLine().getStatusCode() != 200) {
       try {
         Thread.sleep(healthCheckFrequency);
         waitingTime += healthCheckFrequency;

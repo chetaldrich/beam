@@ -833,7 +833,7 @@ public class ElasticsearchIO {
       // remove the scroll
       String requestBody = String.format("{\"scroll_id\" : [\"%s\"]}", scrollId);
       HttpEntity entity = new NStringEntity(requestBody, ContentType.APPLICATION_JSON);
-      Request request = new Request("DELETE", "_/search/scroll");
+      Request request = new Request("DELETE", "/_search/scroll");
       request.setEntity(entity);
       try {
         restClient.performRequest(request);
