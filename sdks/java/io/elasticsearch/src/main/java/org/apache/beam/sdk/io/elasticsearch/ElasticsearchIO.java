@@ -1356,7 +1356,10 @@ public class ElasticsearchIO {
       int backendVersion =
           Integer.parseInt(jsonNode.path("version").path("number").asText().substring(0, 1));
       checkArgument(
-          (backendVersion == 2 || backendVersion == 5 || backendVersion == 6),
+          (backendVersion == 2
+              || backendVersion == 5
+              || backendVersion == 6
+              || backendVersion == 7),
           "The Elasticsearch version to connect to is %s.x. "
               + "This version of the ElasticsearchIO is only compatible with "
               + "Elasticsearch v7.x, v6.x, v5.x and v2.x",
