@@ -107,6 +107,7 @@ import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
+import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.beam.sdk.values.TypeDescriptors;
 import org.apache.beam.sdk.values.ValueInSingleWindow;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
@@ -184,6 +185,12 @@ import org.slf4j.LoggerFactory;
  * <p>Both functions support reading either from a table or from the result of a query, via {@link
  * TypedRead#from(String)} and {@link TypedRead#fromQuery} respectively. Exactly one of these must
  * be specified.
+ *
+ * <p>If you are reading from an authorized view wih {@link TypedRead#fromQuery}, you need to use
+ * {@link TypedRead#withQueryLocation(String)} to set the location of the BigQuery job. Otherwise,
+ * Beam will ty to determine that location by reading the metadata of the dataset that contains the
+ * underlying tables. With authorized views, that will result in a 403 error and the query will not
+ * be resolved.
  *
  * <p><b>Type Conversion Table</b>
  *
@@ -267,7 +274,7 @@ import org.slf4j.LoggerFactory;
  * <p>Users can optionally specify a query priority using {@link TypedRead#withQueryPriority(
  * TypedRead.QueryPriority)} and a geographic location where the query will be executed using {@link
  * TypedRead#withQueryLocation(String)}. Query location must be specified for jobs that are not
- * executed in US or EU. See <a
+ * executed in US or EU, or if you are reading from an authorized view. See <a
  * href="https://cloud.google.com/bigquery/docs/reference/rest/v2/jobs/query">BigQuery Jobs:
  * query</a>.
  *
@@ -276,9 +283,20 @@ import org.slf4j.LoggerFactory;
  * <p>To write to a BigQuery table, apply a {@link BigQueryIO.Write} transformation. This consumes a
  * {@link PCollection} of a user-defined type when using {@link BigQueryIO#write()} (recommended),
  * or a {@link PCollection} of {@link TableRow TableRows} as input when using {@link
- * BigQueryIO#writeTableRows()} (not recommended). When using a user-defined type, a function must
- * be provided to turn this type into a {@link TableRow} using {@link
- * BigQueryIO.Write#withFormatFunction(SerializableFunction)}.
+ * BigQueryIO#writeTableRows()} (not recommended). When using a user-defined type, one of the
+ * following must be provided.
+ *
+ * <ul>
+ *   <li>{@link BigQueryIO.Write#withAvroFormatFunction(SerializableFunction)} (recommended) to
+ *       write data using avro records.
+ *   <li>{@link BigQueryIO.Write#withFormatFunction(SerializableFunction)} to write data as json
+ *       encoded {@link TableRow TableRows}.
+ * </ul>
+ *
+ * If {@link BigQueryIO.Write#withAvroFormatFunction(SerializableFunction)} is used, the table
+ * schema MUST be specified using one of the {@link Write#withJsonSchema(String)}, {@link
+ * Write#withJsonSchema(ValueProvider)}, {@link Write#withSchemaFromView(PCollectionView)} methods,
+ * or {@link Write#to(DynamicDestinations)}.
  *
  * <pre>{@code
  * class Quote {
@@ -465,6 +483,15 @@ public class BigQueryIO {
    */
   static final SerializableFunction<TableRow, TableRow> IDENTITY_FORMATTER = input -> input;
 
+  private static final SerializableFunction<TableSchema, org.apache.avro.Schema>
+      DEFAULT_AVRO_SCHEMA_FACTORY =
+          new SerializableFunction<TableSchema, org.apache.avro.Schema>() {
+            @Override
+            public org.apache.avro.Schema apply(TableSchema input) {
+              return BigQueryAvroUtils.toGenericAvroSchema("root", input.getFields());
+            }
+          };
+
   /**
    * @deprecated Use {@link #read(SerializableFunction)} or {@link #readTableRows} instead. {@link
    *     #readTableRows()} does exactly the same as {@link #read}, however {@link
@@ -491,7 +518,9 @@ public class BigQueryIO {
     return read(new TableRowParser())
         .withCoder(TableRowJsonCoder.of())
         .withBeamRowConverters(
-            BigQueryUtils.tableRowToBeamRow(), BigQueryUtils.tableRowFromBeamRow());
+            TypeDescriptor.of(TableRow.class),
+            BigQueryUtils.tableRowToBeamRow(),
+            BigQueryUtils.tableRowFromBeamRow());
   }
 
   /**
@@ -736,6 +765,9 @@ public class BigQueryIO {
       abstract Builder<T> setKmsKey(String kmsKey);
 
       @Experimental(Experimental.Kind.SCHEMAS)
+      abstract Builder<T> setTypeDescriptor(TypeDescriptor<T> typeDescriptor);
+
+      @Experimental(Experimental.Kind.SCHEMAS)
       abstract Builder<T> setToBeamRowFn(ToBeamRowFunction<T> toRowFn);
 
       @Experimental(Experimental.Kind.SCHEMAS)
@@ -790,6 +822,10 @@ public class BigQueryIO {
 
     @Nullable
     abstract String getKmsKey();
+
+    @Nullable
+    @Experimental(Experimental.Kind.SCHEMAS)
+    abstract TypeDescriptor<T> getTypeDescriptor();
 
     @Nullable
     @Experimental(Experimental.Kind.SCHEMAS)
@@ -967,7 +1003,7 @@ public class BigQueryIO {
 
       // if both toRowFn and fromRowFn values are set, enable Beam schema support
       boolean beamSchemaEnabled = false;
-      if (getToBeamRowFn() != null && getFromBeamRowFn() != null) {
+      if (getTypeDescriptor() != null && getToBeamRowFn() != null && getFromBeamRowFn() != null) {
         beamSchemaEnabled = true;
       }
 
@@ -1122,7 +1158,7 @@ public class BigQueryIO {
         SerializableFunction<T, Row> toBeamRow = getToBeamRowFn().apply(beamSchema);
         SerializableFunction<Row, T> fromBeamRow = getFromBeamRowFn().apply(beamSchema);
 
-        rows.setSchema(beamSchema, toBeamRow, fromBeamRow);
+        rows.setSchema(beamSchema, getTypeDescriptor(), toBeamRow, fromBeamRow);
       }
       return rows;
     }
@@ -1388,8 +1424,14 @@ public class BigQueryIO {
      */
     @Experimental(Experimental.Kind.SCHEMAS)
     public TypedRead<T> withBeamRowConverters(
-        ToBeamRowFunction<T> toRowFn, FromBeamRowFunction<T> fromRowFn) {
-      return toBuilder().setToBeamRowFn(toRowFn).setFromBeamRowFn(fromRowFn).build();
+        TypeDescriptor<T> typeDescriptor,
+        ToBeamRowFunction<T> toRowFn,
+        FromBeamRowFunction<T> fromRowFn) {
+      return toBuilder()
+          .setTypeDescriptor(typeDescriptor)
+          .setToBeamRowFn(toRowFn)
+          .setFromBeamRowFn(fromRowFn)
+          .build();
     }
 
     /** See {@link Read#from(String)}. */
@@ -1448,8 +1490,9 @@ public class BigQueryIO {
      * BigQuery geographic location where the query <a
      * href="https://cloud.google.com/bigquery/docs/reference/rest/v2/jobs">job</a> will be
      * executed. If not specified, Beam tries to determine the location by examining the tables
-     * referenced by the query. Location must be specified for queries not executed in US or EU. See
-     * <a href="https://cloud.google.com/bigquery/docs/reference/rest/v2/jobs/query">BigQuery Jobs:
+     * referenced by the query. Location must be specified for queries not executed in US or EU, or
+     * when you are reading from an authorized view. See <a
+     * href="https://cloud.google.com/bigquery/docs/reference/rest/v2/jobs/query">BigQuery Jobs:
      * query</a>.
      */
     public TypedRead<T> withQueryLocation(String location) {
@@ -1663,6 +1706,12 @@ public class BigQueryIO {
     abstract SerializableFunction<T, TableRow> getFormatFunction();
 
     @Nullable
+    abstract SerializableFunction<AvroWriteRequest<T>, GenericRecord> getAvroFormatFunction();
+
+    @Nullable
+    abstract SerializableFunction<TableSchema, org.apache.avro.Schema> getAvroSchemaFactory();
+
+    @Nullable
     abstract DynamicDestinations<T, ?> getDynamicDestinations();
 
     @Nullable
@@ -1737,6 +1786,12 @@ public class BigQueryIO {
           SerializableFunction<ValueInSingleWindow<T>, TableDestination> tableFunction);
 
       abstract Builder<T> setFormatFunction(SerializableFunction<T, TableRow> formatFunction);
+
+      abstract Builder<T> setAvroFormatFunction(
+          SerializableFunction<AvroWriteRequest<T>, GenericRecord> avroFormatFunction);
+
+      abstract Builder<T> setAvroSchemaFactory(
+          SerializableFunction<TableSchema, org.apache.avro.Schema> avroSchemaFactory);
 
       abstract Builder<T> setDynamicDestinations(DynamicDestinations<T, ?> dynamicDestinations);
 
@@ -1908,6 +1963,27 @@ public class BigQueryIO {
     /** Formats the user's type into a {@link TableRow} to be written to BigQuery. */
     public Write<T> withFormatFunction(SerializableFunction<T, TableRow> formatFunction) {
       return toBuilder().setFormatFunction(formatFunction).build();
+    }
+
+    /**
+     * Formats the user's type into a {@link GenericRecord} to be written to BigQuery.
+     *
+     * <p>This is mutually exclusive with {@link #withFormatFunction}, only one may be set.
+     */
+    public Write<T> withAvroFormatFunction(
+        SerializableFunction<AvroWriteRequest<T>, GenericRecord> avroFormatFunction) {
+      return toBuilder().setAvroFormatFunction(avroFormatFunction).setOptimizeWrites(true).build();
+    }
+
+    /**
+     * Uses the specified function to convert a {@link TableSchema} to a {@link
+     * org.apache.avro.Schema}.
+     *
+     * <p>If not specified, the TableSchema will automatically be converted to an avro schema.
+     */
+    public Write<T> withAvroSchemaFactory(
+        SerializableFunction<TableSchema, org.apache.avro.Schema> avroSchemaFactory) {
+      return toBuilder().setAvroSchemaFactory(avroSchemaFactory).build();
     }
 
     /**
@@ -2280,6 +2356,16 @@ public class BigQueryIO {
             input.isBounded(),
             method);
       }
+
+      if (method != Method.FILE_LOADS) {
+        // we only support writing avro for FILE_LOADS
+        checkArgument(
+            getAvroFormatFunction() == null,
+            "Writing avro formatted data is only supported for FILE_LOADS, however "
+                + "the method was %s",
+            method);
+      }
+
       if (getJsonTimePartitioning() != null) {
         checkArgument(
             getDynamicDestinations() == null,
@@ -2336,12 +2422,26 @@ public class BigQueryIO {
         PCollection<T> input, DynamicDestinations<T, DestinationT> dynamicDestinations) {
       boolean optimizeWrites = getOptimizeWrites();
       SerializableFunction<T, TableRow> formatFunction = getFormatFunction();
+      SerializableFunction<AvroWriteRequest<T>, GenericRecord> avroFormatFunction =
+          getAvroFormatFunction();
+
+      boolean hasSchema =
+          getJsonSchema() != null
+              || getDynamicDestinations() != null
+              || getSchemaFromView() != null;
+
       if (getUseBeamSchema()) {
         checkArgument(input.hasSchema());
         optimizeWrites = true;
+
+        checkArgument(
+            avroFormatFunction == null,
+            "avroFormatFunction is unsupported when using Beam schemas.");
+
         if (formatFunction == null) {
           // If no format function set, then we will automatically convert the input type to a
           // TableRow.
+          // TODO: it would be trivial to convert to avro records here instead.
           formatFunction = BigQueryUtils.toTableRow(input.getToRowFunction());
         }
         // Infer the TableSchema from the input Beam schema.
@@ -2353,18 +2453,9 @@ public class BigQueryIO {
       } else {
         // Require a schema if creating one or more tables.
         checkArgument(
-            getCreateDisposition() != CreateDisposition.CREATE_IF_NEEDED
-                || getJsonSchema() != null
-                || getDynamicDestinations() != null
-                || getSchemaFromView() != null,
+            getCreateDisposition() != CreateDisposition.CREATE_IF_NEEDED || hasSchema,
             "CreateDisposition is CREATE_IF_NEEDED, however no schema was provided.");
       }
-
-      checkArgument(
-          formatFunction != null,
-          "A function must be provided to convert type into a TableRow. "
-              + "use BigQueryIO.Write.withFormatFunction to provide a formatting function."
-              + "A format function is not required if Beam schemas are used.");
 
       Coder<DestinationT> destinationCoder = null;
       try {
@@ -2377,6 +2468,34 @@ public class BigQueryIO {
 
       Method method = resolveMethod(input);
       if (optimizeWrites) {
+        RowWriterFactory<T, DestinationT> rowWriterFactory;
+        if (avroFormatFunction != null) {
+          checkArgument(
+              formatFunction == null,
+              "Only one of withFormatFunction or withAvroFormatFunction maybe set, not both.");
+
+          SerializableFunction<TableSchema, org.apache.avro.Schema> avroSchemaFactory =
+              getAvroSchemaFactory();
+          if (avroSchemaFactory == null) {
+            checkArgument(
+                hasSchema,
+                "A schema must be provided if an avroFormatFunction "
+                    + "is set but no avroSchemaFactory is defined.");
+            avroSchemaFactory = DEFAULT_AVRO_SCHEMA_FACTORY;
+          }
+          rowWriterFactory =
+              RowWriterFactory.avroRecords(
+                  avroFormatFunction, avroSchemaFactory, dynamicDestinations);
+        } else if (formatFunction != null) {
+          rowWriterFactory = RowWriterFactory.tableRows(formatFunction);
+        } else {
+          throw new IllegalArgumentException(
+              "A function must be provided to convert the input type into a TableRow or "
+                  + "GenericRecord. Use BigQueryIO.Write.withFormatFunction or "
+                  + "BigQueryIO.Write.withAvroFormatFunction to provide a formatting function. "
+                  + "A format function is not required if Beam schemas are used.");
+        }
+
         PCollection<KV<DestinationT, T>> rowsWithDestination =
             input
                 .apply(
@@ -2388,19 +2507,31 @@ public class BigQueryIO {
             input.getCoder(),
             destinationCoder,
             dynamicDestinations,
-            formatFunction,
+            rowWriterFactory,
             method);
       } else {
+        checkArgument(avroFormatFunction == null);
+        checkArgument(
+            formatFunction != null,
+            "A function must be provided to convert the input type into a TableRow or "
+                + "GenericRecord. Use BigQueryIO.Write.withFormatFunction or "
+                + "BigQueryIO.Write.withAvroFormatFunction to provide a formatting function. "
+                + "A format function is not required if Beam schemas are used.");
+
         PCollection<KV<DestinationT, TableRow>> rowsWithDestination =
             input
                 .apply("PrepareWrite", new PrepareWrite<>(dynamicDestinations, formatFunction))
                 .setCoder(KvCoder.of(destinationCoder, TableRowJsonCoder.of()));
+
+        RowWriterFactory<TableRow, DestinationT> rowWriterFactory =
+            RowWriterFactory.tableRows(SerializableFunctions.identity());
+
         return continueExpandTyped(
             rowsWithDestination,
             TableRowJsonCoder.of(),
             destinationCoder,
             dynamicDestinations,
-            SerializableFunctions.identity(),
+            rowWriterFactory,
             method);
       }
     }
@@ -2410,7 +2541,7 @@ public class BigQueryIO {
         Coder<ElementT> elementCoder,
         Coder<DestinationT> destinationCoder,
         DynamicDestinations<T, DestinationT> dynamicDestinations,
-        SerializableFunction<ElementT, TableRow> toRowFunction,
+        RowWriterFactory<ElementT, DestinationT> rowWriterFactory,
         Method method) {
       if (method == Method.STREAMING_INSERTS) {
         checkArgument(
@@ -2419,9 +2550,19 @@ public class BigQueryIO {
         InsertRetryPolicy retryPolicy =
             MoreObjects.firstNonNull(getFailedInsertRetryPolicy(), InsertRetryPolicy.alwaysRetry());
 
+        checkArgument(
+            rowWriterFactory.getOutputType() == RowWriterFactory.OutputType.JsonTableRow,
+            "Avro output is not supported when method == STREAMING_INSERTS");
+
+        RowWriterFactory.TableRowWriterFactory<ElementT, DestinationT> tableRowWriterFactory =
+            (RowWriterFactory.TableRowWriterFactory<ElementT, DestinationT>) rowWriterFactory;
+
         StreamingInserts<DestinationT, ElementT> streamingInserts =
             new StreamingInserts<>(
-                    getCreateDisposition(), dynamicDestinations, elementCoder, toRowFunction)
+                    getCreateDisposition(),
+                    dynamicDestinations,
+                    elementCoder,
+                    tableRowWriterFactory.getToRowFn())
                 .withInsertRetryPolicy(retryPolicy)
                 .withTestServices(getBigQueryServices())
                 .withExtendedErrorInfo(getExtendedErrorInfo())
@@ -2445,7 +2586,7 @@ public class BigQueryIO {
                 getLoadJobProjectId(),
                 getIgnoreUnknownValues(),
                 elementCoder,
-                toRowFunction,
+                rowWriterFactory,
                 getKmsKey());
         batchLoads.setTestServices(getBigQueryServices());
         if (getMaxFilesPerBundle() != null) {

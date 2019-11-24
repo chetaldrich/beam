@@ -78,6 +78,7 @@ import org.apache.beam.runners.dataflow.worker.StreamingModeExecutionContext.Str
 import org.apache.beam.runners.dataflow.worker.apiary.FixMultiOutputInfosOnParDoInstructions;
 import org.apache.beam.runners.dataflow.worker.counters.Counter;
 import org.apache.beam.runners.dataflow.worker.counters.CounterSet;
+import org.apache.beam.runners.dataflow.worker.counters.CounterUpdateAggregators;
 import org.apache.beam.runners.dataflow.worker.counters.DataflowCounterUpdateExtractor;
 import org.apache.beam.runners.dataflow.worker.counters.NameContext;
 import org.apache.beam.runners.dataflow.worker.graph.CloneAmbiguousFlattensFunction;
@@ -129,6 +130,7 @@ import org.apache.beam.sdk.util.WindowedValue.WindowedValueCoder;
 import org.apache.beam.vendor.grpc.v1p21p0.com.google.protobuf.ByteString;
 import org.apache.beam.vendor.grpc.v1p21p0.com.google.protobuf.TextFormat;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.MoreObjects;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Optional;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Splitter;
@@ -197,6 +199,8 @@ public class StreamingDataflowWorker {
 
   /** Maximum number of failure stacktraces to report in each update sent to backend. */
   private static final int MAX_FAILURES_TO_REPORT_IN_UPDATE = 1000;
+
+  private final AtomicLong counterAggregationErrorCount = new AtomicLong();
 
   /** Returns whether an exception was caused by a {@link OutOfMemoryError}. */
   private static boolean isOutOfMemoryError(Throwable t) {
@@ -1144,6 +1148,15 @@ public class StreamingDataflowWorker {
     }
   }
 
+  private Windmill.WorkItemCommitRequest.Builder initializeOutputBuilder(
+      final ByteString key, final Windmill.WorkItem workItem) {
+    return Windmill.WorkItemCommitRequest.newBuilder()
+        .setKey(key)
+        .setShardingKey(workItem.getShardingKey())
+        .setWorkToken(workItem.getWorkToken())
+        .setCacheToken(workItem.getCacheToken());
+  }
+
   private void process(
       final SdkWorkerHarness worker,
       final ComputationState computationState,
@@ -1160,12 +1173,7 @@ public class StreamingDataflowWorker {
     DataflowWorkerLoggingMDC.setStageName(computationId);
     LOG.debug("Starting processing for {}:\n{}", computationId, work);
 
-    Windmill.WorkItemCommitRequest.Builder outputBuilder =
-        Windmill.WorkItemCommitRequest.newBuilder()
-            .setKey(key)
-            .setShardingKey(workItem.getShardingKey())
-            .setWorkToken(workItem.getWorkToken())
-            .setCacheToken(workItem.getCacheToken());
+    Windmill.WorkItemCommitRequest.Builder outputBuilder = initializeOutputBuilder(key, workItem);
 
     // Before any processing starts, call any pending OnCommit callbacks.  Nothing that requires
     // cleanup should be done before this, since we might exit early here.
@@ -1330,20 +1338,22 @@ public class StreamingDataflowWorker {
       WorkItemCommitRequest commitRequest = outputBuilder.build();
       int byteLimit = maxWorkItemCommitBytes;
       int commitSize = commitRequest.getSerializedSize();
+      int estimatedCommitSize = commitSize < 0 ? Integer.MAX_VALUE : commitSize;
+
       // Detect overflow of integer serialized size or if the byte limit was exceeded.
-      windmillMaxObservedWorkItemCommitBytes.addValue(
-          commitSize < 0 ? Integer.MAX_VALUE : commitSize);
-      if (commitSize < 0) {
-        throw KeyCommitTooLargeException.causedBy(computationId, byteLimit, commitRequest);
-      } else if (commitSize > byteLimit) {
-        // Once supported, we should communicate the desired truncation for the commit to the
-        // streaming engine. For now we report the error but attempt the commit so that it will be
-        // truncated by the streaming engine backend.
+      windmillMaxObservedWorkItemCommitBytes.addValue(estimatedCommitSize);
+      if (estimatedCommitSize > byteLimit) {
         KeyCommitTooLargeException e =
             KeyCommitTooLargeException.causedBy(computationId, byteLimit, commitRequest);
         reportFailure(computationId, workItem, e);
         LOG.error(e.toString());
+
+        // Drop the current request in favor of a new, minimal one requesting truncation.
+        // Messages, timers, counters, and other commit content will not be used by the service
+        // so we're purposefully dropping them here
+        commitRequest = buildWorkItemTruncationRequest(key, workItem, estimatedCommitSize);
       }
+
       commitQueue.put(new Commit(commitRequest, computationState, work));
 
       // Compute shuffle and state byte statistics these will be flushed asynchronously.
@@ -1436,6 +1446,14 @@ public class StreamingDataflowWorker {
       DataflowWorkerLoggingMDC.setWorkId(null);
       DataflowWorkerLoggingMDC.setStageName(null);
     }
+  }
+
+  private WorkItemCommitRequest buildWorkItemTruncationRequest(
+      final ByteString key, final Windmill.WorkItem workItem, final int estimatedCommitSize) {
+    Windmill.WorkItemCommitRequest.Builder outputBuilder = initializeOutputBuilder(key, workItem);
+    outputBuilder.setExceedsMaxWorkItemCommitBytes(true);
+    outputBuilder.setEstimatedWorkItemCommitBytes(estimatedCommitSize);
+    return outputBuilder.build();
   }
 
   private void commitLoop() {
@@ -1891,6 +1909,8 @@ public class StreamingDataflowWorker {
       counterUpdates.addAll(
           deltaCounters.extractModifiedDeltaUpdates(DataflowCounterUpdateExtractor.INSTANCE));
       if (hasExperiment(options, "beam_fn_api")) {
+        Map<Object, List<CounterUpdate>> fnApiCounters = new HashMap<>();
+
         while (!this.pendingMonitoringInfos.isEmpty()) {
           final CounterUpdate item = this.pendingMonitoringInfos.poll();
 
@@ -1900,16 +1920,49 @@ public class StreamingDataflowWorker {
           // WorkItem.
           if (item.getCumulative()) {
             item.setCumulative(false);
+            // Group counterUpdates by counterUpdateKey so they can be aggregated before sending to
+            // dataflow service.
+            fnApiCounters
+                .computeIfAbsent(getCounterUpdateKey(item), k -> new ArrayList<>())
+                .add(item);
           } else {
             // In current world all counters coming from FnAPI are cumulative.
             // This is a safety check in case new counter type appears in FnAPI.
             throw new UnsupportedOperationException(
                 "FnApi counters are expected to provide cumulative values."
-                    + " Please, update convertion to delta logic"
+                    + " Please, update conversion to delta logic"
                     + " if non-cumulative counter type is required.");
           }
+        }
 
-          counterUpdates.add(item);
+        // Aggregates counterUpdates with same counterUpdateKey to single CounterUpdate if possible
+        // so we can avoid excessive I/Os for reporting to dataflow service.
+        for (List<CounterUpdate> counterUpdateList : fnApiCounters.values()) {
+          if (counterUpdateList.isEmpty()) {
+            continue;
+          }
+          List<CounterUpdate> aggregatedCounterUpdateList =
+              CounterUpdateAggregators.aggregate(counterUpdateList);
+
+          // Log a warning message if encountered enough non-aggregatable counter updates since this
+          // can lead to a severe performance penalty if dataflow service can not handle the
+          // updates.
+          if (aggregatedCounterUpdateList.size() > 10) {
+            CounterUpdate head = aggregatedCounterUpdateList.get(0);
+            this.counterAggregationErrorCount.getAndIncrement();
+            // log warning message only when error count is the power of 2 to avoid spamming.
+            if (this.counterAggregationErrorCount.get() > 10
+                && Long.bitCount(this.counterAggregationErrorCount.get()) == 1) {
+              LOG.warn(
+                  "Found non-aggregated counter updates of size {} with kind {}, this will likely "
+                      + "cause performance degradation and excessive GC if size is large.",
+                  counterUpdateList.size(),
+                  MoreObjects.firstNonNull(
+                      head.getNameAndKind(), head.getStructuredNameAndMetadata()));
+            }
+          }
+
+          counterUpdates.addAll(aggregatedCounterUpdateList);
         }
       }
     }

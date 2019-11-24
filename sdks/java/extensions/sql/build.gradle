@@ -38,8 +38,6 @@ configurations {
   fmppTemplates
 }
 
-def zetasql_version = "2019.09.1"
-
 dependencies {
   javacc "net.java.dev.javacc:javacc:4.0"
   fmppTask "com.googlecode.fmpp-maven-plugin:fmpp-maven-plugin:1.0"
@@ -47,18 +45,15 @@ dependencies {
   fmppTemplates library.java.vendored_calcite_1_20_0
   compile project(":sdks:java:core")
   compile project(":sdks:java:extensions:join-library")
-  compile project(":runners:direct-java")
+  compile project(path: ":runners:direct-java", configuration: "shadow")
   compile library.java.commons_csv
   compile library.java.vendored_calcite_1_20_0
   compile "com.alibaba:fastjson:1.2.49"
   compile "org.codehaus.janino:janino:3.0.11"
   compile "org.codehaus.janino:commons-compiler:3.0.11"
-  compile "com.google.zetasql:zetasql-jni-channel:$zetasql_version"
-  compile "com.google.zetasql:zetasql-client:$zetasql_version"
-  compile "com.google.zetasql:zetasql-types:$zetasql_version"
-  compile "com.google.api.grpc:proto-google-common-protos:1.12.0" // Interfaces with ZetaSQL use this
   provided project(":sdks:java:io:kafka")
   provided project(":sdks:java:io:google-cloud-platform")
+  compile project(":sdks:java:io:mongodb")
   provided project(":sdks:java:io:parquet")
   provided library.java.kafka_clients
   testCompile library.java.vendored_calcite_1_20_0
@@ -68,6 +63,7 @@ dependencies {
   testCompile library.java.hamcrest_library
   testCompile library.java.mockito_core
   testCompile library.java.quickcheck_core
+  testCompile project(path: ":sdks:java:io:mongodb", configuration: "testRuntime")
   testRuntimeClasspath library.java.slf4j_jdk14
 }
 
@@ -145,19 +141,6 @@ task runPojoExample(type: JavaExec) {
   args = ["--runner=DirectRunner"]
 }
 
-task runZetaSQLTest(type: Test) {
-  // Disable Gradle cache (it should not be used because the IT's won't run).
-  outputs.upToDateWhen { false }
-
-  include '**/*TestZetaSQL.class'
-  classpath = project(":sdks:java:extensions:sql")
-          .sourceSets
-          .test
-          .runtimeClasspath
-  testClassesDirs = files(project(":sdks:java:extensions:sql").sourceSets.test.output.classesDirs)
-  useJUnit { }
-}
-
 task integrationTest(type: Test) {
   group = "Verification"
   def gcpProject = project.findProperty('gcpProject') ?: 'apache-beam-testing'
@@ -175,6 +158,7 @@ task integrationTest(type: Test) {
 
   include '**/*IT.class'
   exclude '**/KafkaCSVTableIT.java'
+  exclude '**/MongoDbReadWriteIT.java'
   maxParallelForks 4
   classpath = project(":sdks:java:extensions:sql")
           .sourceSets

@@ -62,6 +62,7 @@ import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.CaseFormat;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Strings;
+import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Maps;
 import org.joda.time.Days;
@@ -245,7 +246,7 @@ public class AvroUtils {
 
   /**
    * Convert from a Beam Row to an AVRO GenericRecord. If a Schema is not provided, one is inferred
-   * from the Beam schema on the orw.
+   * from the Beam schema on the row.
    */
   public static GenericRecord toGenericRecord(
       Row row, @Nullable org.apache.avro.Schema avroSchema) {
@@ -329,7 +330,10 @@ public class AvroUtils {
   public static <T> SchemaCoder<T> schemaCoder(TypeDescriptor<T> type) {
     @SuppressWarnings("unchecked")
     Class<T> clazz = (Class<T>) type.getRawType();
-    return schemaCoder(clazz);
+    org.apache.avro.Schema avroSchema = new ReflectData(clazz.getClassLoader()).getSchema(clazz);
+    Schema beamSchema = toBeamSchema(avroSchema);
+    return SchemaCoder.of(
+        beamSchema, type, getToRowFunction(clazz, avroSchema), getFromRowFunction(clazz));
   }
 
   /**
@@ -338,7 +342,7 @@ public class AvroUtils {
    * @param <T> the element type
    */
   public static <T> SchemaCoder<T> schemaCoder(Class<T> clazz) {
-    return schemaCoder(clazz, new ReflectData(clazz.getClassLoader()).getSchema(clazz));
+    return schemaCoder(TypeDescriptor.of(clazz));
   }
 
   /**
@@ -346,7 +350,12 @@ public class AvroUtils {
    * GenericRecord.
    */
   public static SchemaCoder<GenericRecord> schemaCoder(org.apache.avro.Schema schema) {
-    return schemaCoder(GenericRecord.class, schema);
+    Schema beamSchema = toBeamSchema(schema);
+    return SchemaCoder.of(
+        beamSchema,
+        TypeDescriptor.of(GenericRecord.class),
+        getGenericRecordToRowFunction(beamSchema),
+        getRowToGenericRecordFunction(schema));
   }
 
   /**
@@ -360,7 +369,10 @@ public class AvroUtils {
    */
   public static <T> SchemaCoder<T> schemaCoder(Class<T> clazz, org.apache.avro.Schema schema) {
     return SchemaCoder.of(
-        getSchema(clazz, schema), getToRowFunction(clazz, schema), getFromRowFunction(clazz));
+        getSchema(clazz, schema),
+        TypeDescriptor.of(clazz),
+        getToRowFunction(clazz, schema),
+        getFromRowFunction(clazz));
   }
 
   /**
@@ -604,6 +616,7 @@ public class AvroUtils {
         break;
 
       case ARRAY:
+      case ITERABLE:
         baseType =
             org.apache.avro.Schema.createArray(
                 getFieldSchema(fieldType.getCollectionElementType(), fieldName, namespace));
@@ -693,10 +706,11 @@ public class AvroUtils {
             "Unknown logical type " + fieldType.getLogicalType().getIdentifier());
 
       case ARRAY:
-        List array = (List) value;
-        List<Object> translatedArray = Lists.newArrayListWithExpectedSize(array.size());
+      case ITERABLE:
+        Iterable iterable = (Iterable) value;
+        List<Object> translatedArray = Lists.newArrayListWithExpectedSize(Iterables.size(iterable));
 
-        for (Object arrayElement : array) {
+        for (Object arrayElement : iterable) {
           translatedArray.add(
               genericFromBeamField(
                   fieldType.getCollectionElementType(),

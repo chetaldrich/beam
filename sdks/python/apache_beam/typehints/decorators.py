@@ -294,16 +294,22 @@ class IOTypeHints(object):
     """Removes outer Iterable (or equivalent) from output type.
 
     Only affects instances with simple output types, otherwise is a no-op.
+    Does not modify self.
 
     Example: Generator[Tuple(int, int)] becomes Tuple(int, int)
+
+    Returns:
+      A possible copy of this instance with a possibly different output type.
 
     Raises:
       ValueError if output type is simple and not iterable.
     """
     if not self.has_simple_output_type():
-      return
+      return self
     yielded_type = typehints.get_yielded_type(self.output_types[0][0])
-    self.output_types = ((yielded_type,), {})
+    res = self.copy()
+    res.output_types = ((yielded_type,), {})
+    return res
 
   def copy(self):
     return IOTypeHints(self.input_types, self.output_types)
@@ -334,6 +340,22 @@ class IOTypeHints(object):
     return 'IOTypeHints[inputs=%s, outputs=%s]' % (
         self.input_types, self.output_types)
 
+  def __eq__(self, other):
+    def same(a, b):
+      if a is None or not any(a):
+        return b is None or not any(b)
+      else:
+        return a == b
+    return (
+        same(self.input_types, other.input_types)
+        and same(self.output_types, other.output_types))
+
+  def __ne__(self, other):
+    return not self == other
+
+  def __hash__(self):
+    return hash(str(self))
+
 
 class WithTypeHints(object):
   """A mixin class that provides the ability to set and retrieve type hints.
@@ -345,8 +367,9 @@ class WithTypeHints(object):
   def _get_or_create_type_hints(self):
     # __init__ may have not been called
     try:
-      return self._type_hints
-    except AttributeError:
+      # Only return an instance bound to self (see BEAM-8629).
+      return self.__dict__['_type_hints']
+    except KeyError:
       self._type_hints = IOTypeHints()
       return self._type_hints
 
@@ -440,7 +463,7 @@ def getcallargs_forhints_impl_py2(func, typeargs, typekwargs):
   # TODO(BEAM-5490): Reimplement getcallargs and stop relying on monkeypatch.
   inspect.getargspec = getfullargspec
   try:
-    callargs = inspect.getcallargs(func, *packed_typeargs, **typekwargs)
+    callargs = inspect.getcallargs(func, *packed_typeargs, **typekwargs)  # pylint: disable=deprecated-method
   except TypeError as e:
     raise TypeCheckError(e)
   finally:

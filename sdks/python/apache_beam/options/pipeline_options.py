@@ -22,6 +22,8 @@ from __future__ import absolute_import
 import argparse
 import json
 import logging
+import os
+import subprocess
 from builtins import list
 from builtins import object
 
@@ -29,6 +31,7 @@ from apache_beam.options.value_provider import RuntimeValueProvider
 from apache_beam.options.value_provider import StaticValueProvider
 from apache_beam.options.value_provider import ValueProvider
 from apache_beam.transforms.display import HasDisplayData
+from apache_beam.utils import processes
 
 __all__ = [
     'PipelineOptions',
@@ -43,6 +46,9 @@ __all__ = [
     'SetupOptions',
     'TestOptions',
     ]
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _static_value_provider_of(value_type):
@@ -259,7 +265,7 @@ class PipelineOptions(HasDisplayData):
       add_extra_args_fn(parser)
     known_args, unknown_args = parser.parse_known_args(self._flags)
     if unknown_args:
-      logging.warning("Discarding unparseable args: %s", unknown_args)
+      _LOGGER.warning("Discarding unparseable args: %s", unknown_args)
     result = vars(known_args)
 
     # Apply the overrides if any
@@ -500,6 +506,38 @@ class GoogleCloudOptions(PipelineOptions):
                         choices=['COST_OPTIMIZED', 'SPEED_OPTIMIZED'],
                         help='Set the Flexible Resource Scheduling mode')
 
+  def _get_default_gcp_region(self):
+    """Get a default value for Google Cloud region according to
+    https://cloud.google.com/compute/docs/gcloud-compute/#default-properties.
+    If no other default can be found, returns 'us-central1'.
+    """
+    environment_region = os.environ.get('CLOUDSDK_COMPUTE_REGION')
+    if environment_region:
+      _LOGGER.info('Using default GCP region %s from $CLOUDSDK_COMPUTE_REGION',
+                   environment_region)
+      return environment_region
+    try:
+      cmd = ['gcloud', 'config', 'get-value', 'compute/region']
+      # Use subprocess.DEVNULL in Python 3.3+.
+      if hasattr(subprocess, 'DEVNULL'):
+        DEVNULL = subprocess.DEVNULL
+      else:
+        DEVNULL = open(os.devnull, 'ab')
+      raw_output = processes.check_output(cmd, stderr=DEVNULL)
+      formatted_output = raw_output.decode('utf-8').strip()
+      if formatted_output:
+        _LOGGER.info('Using default GCP region %s from `%s`',
+                     formatted_output, ' '.join(cmd))
+        return formatted_output
+    except RuntimeError:
+      pass
+    _LOGGER.warning(
+        '--region not set; will default to us-central1. Future releases of '
+        'Beam will require the user to set --region explicitly, or else have a '
+        'default set via the gcloud tool. '
+        'https://cloud.google.com/compute/docs/regions-zones')
+    return 'us-central1'
+
   def validate(self, validator):
     errors = []
     if validator.is_service_runner():
@@ -514,14 +552,10 @@ class GoogleCloudOptions(PipelineOptions):
         errors.append('--dataflow_job_file and --template_location '
                       'are mutually exclusive.')
 
-    if self.view_as(GoogleCloudOptions).region is None:
-      self.view_as(GoogleCloudOptions).region = 'us-central1'
-      runner = self.view_as(StandardOptions).runner
-      if runner == 'DataflowRunner' or runner == 'TestDataflowRunner':
-        logging.warning(
-            '--region not set; will default to us-central1. Future releases of '
-            'Beam will require the user to set the region explicitly. '
-            'https://cloud.google.com/compute/docs/regions-zones/regions-zones')
+    runner = self.view_as(StandardOptions).runner
+    if runner == 'DataflowRunner' or runner == 'TestDataflowRunner':
+      if self.view_as(GoogleCloudOptions).region is None:
+        self.view_as(GoogleCloudOptions).region = self._get_default_gcp_region()
 
     return errors
 
@@ -602,6 +636,25 @@ class WorkerOptions(PipelineOptions):
         default=None,
         help=('Specifies what type of persistent disk should be used.'))
     parser.add_argument(
+        '--worker_region',
+        default=None,
+        help=
+        ('The Compute Engine region '
+         '(https://cloud.google.com/compute/docs/regions-zones/regions-zones) '
+         'in which worker processing should occur, e.g. "us-west1". Mutually '
+         'exclusive with worker_zone. If neither worker_region nor worker_zone '
+         'is specified, default to same value as --region.'))
+    parser.add_argument(
+        '--worker_zone',
+        default=None,
+        help=
+        ('The Compute Engine zone '
+         '(https://cloud.google.com/compute/docs/regions-zones/regions-zones) '
+         'in which worker processing should occur, e.g. "us-west1-a". Mutually '
+         'exclusive with worker_region. If neither worker_region nor '
+         'worker_zone is specified, the Dataflow service will choose a zone in '
+         '--region based on available capacity.'))
+    parser.add_argument(
         '--zone',
         default=None,
         help=(
@@ -660,6 +713,7 @@ class WorkerOptions(PipelineOptions):
     if validator.is_service_runner():
       errors.extend(
           validator.validate_optional_argument_positive(self, 'num_workers'))
+      errors.extend(validator.validate_worker_region_zone(self))
     return errors
 
 
@@ -679,6 +733,16 @@ class DebugOptions(PipelineOptions):
         ('Runners may provide a number of experimental features that can be '
          'enabled with this flag. Please sync with the owners of the runner '
          'before enabling any experiments.'))
+
+    parser.add_argument(
+        '--number_of_worker_harness_threads',
+        type=int,
+        default=None,
+        help=
+        ('Number of threads per worker to use on the runner. If left '
+         'unspecified, the runner will compute an appropriate number of '
+         'threads to use. Currently only enabled for DataflowRunner when '
+         'experiment \'use_unified_worker\' is enabled.'))
 
   def add_experiment(self, experiment):
     # pylint: disable=access-member-before-definition
@@ -804,15 +868,27 @@ class SetupOptions(PipelineOptions):
 
 class PortableOptions(PipelineOptions):
   """Portable options are common options expected to be understood by most of
-  the portable runners.
+  the portable runners. Should generally be kept in sync with
+  PortablePipelineOptions.java.
   """
   @classmethod
   def _add_argparse_args(cls, parser):
-    parser.add_argument('--job_endpoint',
-                        default=None,
-                        help=
-                        ('Job service endpoint to use. Should be in the form '
-                         'of address and port, e.g. localhost:3000'))
+    parser.add_argument(
+        '--job_endpoint', default=None,
+        help=('Job service endpoint to use. Should be in the form of host '
+              'and port, e.g. localhost:8099.'))
+    parser.add_argument(
+        '--artifact_endpoint', default=None,
+        help=('Artifact staging endpoint to use. Should be in the form of host '
+              'and port, e.g. localhost:8098. If none is specified, the '
+              'artifact endpoint sent from the job server is used.'))
+    parser.add_argument(
+        '--job-server-timeout', default=60, type=int,
+        help=('Job service request timeout in seconds. The timeout '
+              'determines the max time the driver program will wait to '
+              'get a response from the job server. NOTE: the timeout does not '
+              'apply to the actual pipeline run time. The driver program can '
+              'still wait for job completion indefinitely.'))
     parser.add_argument(
         '--environment_type', default=None,
         help=('Set the default environment type for running '
@@ -829,15 +905,60 @@ class PortableOptions(PipelineOptions):
               '"<ENV_VAL>"} }. All fields in the json are optional except '
               'command.'))
     parser.add_argument(
-        '--sdk_worker_parallelism', default=0,
+        '--sdk_worker_parallelism', default=1,
         help=('Sets the number of sdk worker processes that will run on each '
-              'worker node. Default is 0. If 0, it will be automatically set '
-              'by the runner by looking at different parameters (e.g. number '
-              'of CPU cores on the worker machine or configuration).'))
+              'worker node. Default is 1. If 0, a value will be chosen by the '
+              'runner.'))
     parser.add_argument(
         '--environment_cache_millis', default=0,
         help=('Duration in milliseconds for environment cache within a job. '
               '0 means no caching.'))
+    parser.add_argument(
+        '--output_executable_path', default=None,
+        help=('Create an executable jar at this path rather than running '
+              'the pipeline.'))
+
+
+class JobServerOptions(PipelineOptions):
+  """Options for starting a Beam job server. Roughly corresponds to
+  JobServerDriver.ServerConfiguration in Java.
+  """
+  @classmethod
+  def _add_argparse_args(cls, parser):
+    parser.add_argument('--artifacts_dir', default=None,
+                        help='The location to store staged artifact files. '
+                             'Any Beam-supported file system is allowed. '
+                             'If unset, the local temp dir will be used.')
+    parser.add_argument('--job_port', default=0,
+                        help='Port to use for the job service. 0 to use a '
+                             'dynamic port.')
+    parser.add_argument('--artifact_port', default=0,
+                        help='Port to use for artifact staging. 0 to use a '
+                             'dynamic port.')
+    parser.add_argument('--expansion_port', default=0,
+                        help='Port to use for artifact staging. 0 to use a '
+                             'dynamic port.')
+
+
+class FlinkRunnerOptions(PipelineOptions):
+
+  PUBLISHED_FLINK_VERSIONS = ['1.7', '1.8', '1.9']
+
+  @classmethod
+  def _add_argparse_args(cls, parser):
+    parser.add_argument('--flink_master',
+                        default='[auto]',
+                        help='Flink master address (http://host:port)'
+                             ' Use "[local]" to start a local cluster'
+                             ' for the execution. Use "[auto]" if you'
+                             ' plan to either execute locally or let the'
+                             ' Flink job server infer the cluster address.')
+    parser.add_argument('--flink_version',
+                        default=cls.PUBLISHED_FLINK_VERSIONS[-1],
+                        choices=cls.PUBLISHED_FLINK_VERSIONS,
+                        help='Flink version to use.')
+    parser.add_argument('--flink_job_server_jar',
+                        help='Path or URL to a flink jobserver jar.')
 
 
 class TestOptions(PipelineOptions):

@@ -84,10 +84,11 @@ dependencies {
   // runs with the Spark runner, we can provide such a dependency. This is deliberately phrased
   // to not hardcode any runner other than :runners:direct-java
   if (shouldProvideSpark) {
-    gradleRun library.java.spark_streaming
     gradleRun library.java.spark_core, {
       exclude group:"org.slf4j", module:"jul-to-slf4j"
     }
+    gradleRun library.java.spark_sql
+    gradleRun library.java.spark_streaming
   }
 }
 
@@ -102,7 +103,7 @@ if (shouldProvideSpark) {
 //
 // Parameters:
 //   -Pnexmark.runner
-//       Specify a runner subproject, such as ":runners:spark" or ":runners:flink:1.8"
+//       Specify a runner subproject, such as ":runners:spark" or ":runners:flink:1.9"
 //       Defaults to ":runners:direct-java"
 //
 //   -Pnexmark.args
